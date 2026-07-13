@@ -8,36 +8,54 @@ use Illuminate\Support\Facades\Schema;
 
 class ImportSchema extends Command
 {
-    protected $signature = 'db:import-schema {--force : Fuerza la importación aunque ya existan tablas}';
-    protected $description = 'Importa el dump SQL inicial (database/sql/schema.sql) si la BD está vacía';
+    protected $signature = 'db:import-schema {--force : Borra TODAS las tablas y reimporta desde cero}';
+    protected $description = 'Importa el dump SQL inicial (database/sql/schema.sql). Con --force borra todo antes.';
 
     public function handle(): int
     {
         $file = database_path('sql/schema.sql');
 
         if (!file_exists($file)) {
-            $this->warn("No se encontró el archivo {$file}. Nada que importar.");
+            $this->warn("No se encontró {$file}. Nada que importar.");
             return self::SUCCESS;
         }
 
-        // Idempotencia: si ya existe la tabla 'roles', asumimos que la BD ya fue importada
+        // Sin --force: si ya hay tabla roles, saltamos (idempotente)
         if (!$this->option('force') && Schema::hasTable('roles')) {
-            $this->info('La BD ya contiene el esquema (tabla "roles" detectada). Saltando importación.');
+            $this->info('BD ya contiene el esquema (tabla "roles" existe). Saltando.');
             return self::SUCCESS;
         }
 
-        $this->info('Importando ' . $file . ' ...');
+        // Con --force: dropear TODAS las tablas antes de importar
+        if ($this->option('force')) {
+            $this->warn('MODO --force: eliminando todas las tablas existentes...');
+            try {
+                DB::statement('SET FOREIGN_KEY_CHECKS = 0;');
+                $tables = DB::select('SHOW TABLES');
+                $dbName = DB::getDatabaseName();
+                $key = 'Tables_in_' . $dbName;
+                foreach ($tables as $row) {
+                    $t = $row->$key ?? array_values((array)$row)[0];
+                    DB::statement("DROP TABLE IF EXISTS `{$t}`");
+                    $this->line("  drop {$t}");
+                }
+                DB::statement('SET FOREIGN_KEY_CHECKS = 1;');
+            } catch (\Throwable $e) {
+                $this->error('Error dropeando tablas: ' . $e->getMessage());
+                return self::FAILURE;
+            }
+        }
 
+        $this->info("Importando {$file} ...");
         $sql = file_get_contents($file);
         if ($sql === false || trim($sql) === '') {
             $this->error('No se pudo leer el archivo SQL o está vacío.');
             return self::FAILURE;
         }
 
-        // Ejecutamos todo el dump como un solo bloque; MySQL/MariaDB soporta multiquery vía PDO unbuffered.
         try {
             DB::unprepared($sql);
-            $this->info('Esquema importado correctamente.');
+            $this->info('Esquema y datos importados correctamente.');
             return self::SUCCESS;
         } catch (\Throwable $e) {
             $this->error('Error importando el SQL: ' . $e->getMessage());
